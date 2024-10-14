@@ -9,6 +9,7 @@ linker_script = '''
 SECTIONS {
     .text : {
         . = 0x0;
+        *(.tinygrad-batched);
         *(.tinygrad);
         *(.text);
         *(.rodata*);
