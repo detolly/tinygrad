@@ -107,6 +107,7 @@ class CStyleLanguage(Renderer):
     prg = ''.join([f"{self.kernel_prefix}void {self.get_kernel_modifier(uops)}{function_name}(",] +
     [', '.join([f'{t} {name}' for name,t in buftypes] + self.extra_args)] +
     [") __attribute__((section(\".tinygrad\"))) {\n" + tmp] + ['\n'.join(kernel), "\n}"])
+    prg += "_Thread_local int errno;"
     return prg if prefix is None else "\n".join(prefix)+f"\n{prg}"
 
   def render_dtype(self, var_dtype:DType) -> str:

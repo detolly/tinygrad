@@ -31,8 +31,8 @@ class ClangCompiler(Compiler):
       pathlib.Path(linker_file.name).write_text(linker_script)
       subprocess.check_output([
         'clang', *self.args, '-O2', '-Wall', '-Werror', '-Wno-gcc-compat', '-x', 'c', '-',
-        '-fPIE', '-fPIC', '-static-libgcc', '-shared', '-', '-o', pathlib.Path(file.name),
-        '-T', pathlib.Path(linker_file.name), '-Wl,-w'
+        '-fPIE', '-fPIC', '-static', '-', '-o', pathlib.Path(file.name),
+        '-T', pathlib.Path(linker_file.name), '-Wl,-w', '-lc', '-lm', '-nostdlib'
       ], input=src.encode('utf-8'))
       raw_function_bytes = subprocess.check_output([
         'objcopy', '-O', 'binary', '--only-section=.text', pathlib.Path(file.name), '/dev/stdout'])
