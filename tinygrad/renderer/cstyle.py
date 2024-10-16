@@ -176,6 +176,7 @@ class ClangRenderer(CStyleLanguage):
   infinity = "__builtin_inff()"
   nan = '__builtin_nanf("")'
   tinygrad_section = True
+  needs_errno = True
 
   # language options
   buffer_suffix = " restrict"
@@ -202,7 +203,13 @@ class ClangRenderer(CStyleLanguage):
   AMX_SET(0);\n  for(int ridx0 = 0; ridx0 < 16; ridx0++){{ AMX(4, (int *)(&data0), 0ull<<62 | (ridx0*4ull)<<56 | ridx0*64ull); }}
   AMX(0, (int *)(&data2), 0ull<<62); AMX(1, (int *)(&data1), 0ull<<62); AMX(12, 0, 0ull);
   for(int ridx0 = 0; ridx0 < 16; ridx0++){{ AMX(5, (int *)(&data0), 0ull<<62 | (ridx0*4ull)<<56 | ridx0*64ull); }}\n  AMX_SET(1);\n  return data0;\n}}"""] # noqa: E501
-    return super().render_kernel(function_name, kernel, bufs, uops, macros + prefix) + "\n_Thread_local int errno;"
+    return super().render_kernel(function_name, kernel, bufs, uops, macros + prefix) + ("\n_Thread_local int errno;" if self.needs_errno else "")
+
+class ClangRendererOSX(ClangRenderer):
+  tinygrad_section = False
+  needs_errno = False
+  def render_vector_prefix(self, dt:DType) -> str: return super().render_vector_prefix(dt)
+  def render_kernel(self, function_name, kernel, bufs, uops, prefix=None) -> str: return super().render_kernel(function_name, kernel, bufs, uops, prefix)
 
 class OpenCLRenderer(CStyleLanguage):
   device = "GPU"
