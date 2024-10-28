@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import List, NamedTuple, Tuple, Union, cast
+from typing import List, NamedTuple, Optional, Tuple, Union, cast
 from typing_extensions import Dict
 from tinygrad.dtype import DType, PtrDType, dtypes
 from tinygrad.ops import BinaryOps, PatternMatcher, UOp, UOps, UPat
@@ -37,8 +37,10 @@ def prefix_reg_to_reg(rm: X86R, reg: X86R): return prefix_byte_rm(rm) | prefix_b
 
 class X8664ASMRenderer(Renderer):
   def __init__(self, avx=False, avx2=False, avx512=False): self.avx, self.avx2, self.avx512 = avx, avx2, avx512; self.reset()
-  def alloc_register(self) -> X86R: 
+  def alloc_register(self, uop: Optional[UOp]=None) -> X86R: 
     reg = filter(lambda r: self.free_registers[r], X86R).__next__()
+    if uop is not None:
+      self.uop_registers[uop] = reg
     self.free_registers[reg] = False
     return reg
   def dealloc_register(self, reg): assert not self.free_registers[reg]; self.free_registers[reg] = True
@@ -47,10 +49,10 @@ class X8664ASMRenderer(Renderer):
     self.free_fpu_registers[reg] = False
     return reg
   def dealloc_fpregister(self, reg): assert not self.free_fpu_registers[reg]; self.free_fpu_registers[reg] = True
-  def alloc_argument_register(self, dtype, buf): 
-    if isinstance(dtype, PtrDType):
+  def alloc_argument_register(self, uop: UOp): 
+    if isinstance(uop.dtype, PtrDType):
       reg = filter(lambda r: self.free_registers[r], X86_ARG_REGISTERS).__next__()
-      self.free_registers[reg] = False; self.buffer_registers[buf] = (reg, dtype)
+      self.free_registers[reg] = False; self.buffer_registers[uop.arg] = (reg, uop.dtype); self.uop_registers[uop] = reg
       return reg
     assert False, "something that wasnt a buffer in arguments"
 
@@ -60,12 +62,14 @@ class X8664ASMRenderer(Renderer):
   def xor(self, rm: X86R, reg: X86R): self.emit([prefix_reg_to_reg(rm, reg), 0x31, modrm_reg_to_reg(rm, reg)])
   def jne(self, rip_relative_offset: int): self.emit([0x0F, 0x85] + little_endian(rip_relative_offset-0x7))
   def sub(self, op1: X86R, immediate32: int): self.emit([prefix_byte_rm(op1) | X86_REX_W, 0x81, modrm_byte_rm(op1) | modrm_byte_reg_opcode(5)] + little_endian(immediate32))
+  def mov(self, op1: X86R, immediate32: int): self.emit([prefix_byte_rm(op1) | X86_REX_W, 0xC7, modrm_byte_rm(op1) | modrm_byte_reg_opcode(0)] + little_endian(immediate32))
 
   def reset(self):
     self.free_registers = { r: True for r in X86R }
     self.free_fpu_registers = { r: True for r in X86FR }
     self.code = bytearray()
     self.buffer_registers: Dict[int, Tuple[X86R, DType]] = {}
+    self.uop_registers: Dict[UOp, X86R] = {}
 
   def render_recursive(self, uops: List[UOp]) -> int:
     i, max = 0, len(uops)
@@ -74,20 +78,35 @@ class X8664ASMRenderer(Renderer):
       uop,dtype,src,args = u.op,u.dtype,u.src,u.arg
       print(u.render(False))
 
-      if uop == UOps.DEFINE_GLOBAL: self.alloc_argument_register(dtype, args)
+      if uop == UOps.DEFINE_GLOBAL: self.alloc_argument_register(u)
       elif uop == UOps.CONST: pass
       elif uop == UOps.RANGE: 
-        counter_register = self.alloc_register()
+        counter_register = self.alloc_register(u)
+        self.mov(counter_register, src[1].arg)
+        assert src[0].arg == 0
         loop_begin = self.tell()
         i += self.render_recursive(uops[i+1:])
         self.sub(counter_register, 1)
         self.jne(-(self.tell() - loop_begin))
-        
+        self.dealloc_register(counter_register)
       elif uop == UOps.ENDRANGE: return i + 1
+      elif uop == UOps.STORE:
+        assert src[0].op == UOps.DEFINE_GLOBAL
+        if src[2].op == UOps.CONST or src[2].op == UOps.CONST:
+          reg = self.alloc_register()
+          #self.mov_rr(reg, )
+          #self.mov(self.buffer_registers[src[0].arg][0], src[2].arg)
+          self.dealloc_register(reg)
+        pass
       else: assert False, f"op {uop} not implemented" 
 
       i+=1
 
+    self.xor(X86R.RAX, X86R.RAX)
+    with open("/tmp/tinygradout", "wb+") as f:
+      f.write(self.code)
+    print(subprocess.check_output(["objdump", "-b", "binary", "-D", "-Mintel,x86-64", "-m", "i386", "/tmp/tinygradout"]).decode())
+    assert False
     return i
 
   def render(self, name: str, uops: List[UOp]) -> str:
