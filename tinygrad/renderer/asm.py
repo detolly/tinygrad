@@ -6,10 +6,12 @@ from tinygrad.ops import BinaryOps, PatternMatcher, UOp, UOps, UPat
 from tinygrad.renderer import Renderer
 import platform, os
 
-class X86R(Enum): # CPU register
+def little_endian(i: int) -> list[int]: return [i & 0xFF, (i & 0xFF00) >> 8, (i & 0xFF0000) >> 16, (i & 0xFF000000) >> 24]
+
+class X86R(Enum):
   RAX = 0; RCX = 1; RDX = 2; RBX = 3; RBP = 5; RSI = 6; RDI = 7
   R8 = 8; R9 = 9; R10 = 10; R11 = 11; R12 = 12; R13 = 13; R14 = 14; R15 = 15
-class X86FR(Enum): # Floating point register
+class X86FR(Enum):
   XMM0 = 0; XMM1 = 1; XMM2 = 2; XMM3 = 3; XMM4 = 4; XMM5 = 5; XMM6 = 6; XMM7 = 7; XMM8 = 8
   XMM9 = 9; XMM10 = 10; XMM11 = 11; XMM12 = 12; XMM13 = 13; XMM14 = 14; XMM15 = 15;
   YMM0 = 0; YMM1 = 1; YMM2 = 2; YMM3 = 3; YMM4 = 4; YMM5 = 5; YMM6 = 6; YMM7 = 7; YMM8 = 8
@@ -20,13 +22,21 @@ class X86FR(Enum): # Floating point register
 X86_REGISTERS_THAT_NEED_TO_BE_SAVED = [X86R.RBX, X86R.R12, X86R.R13, X86R.R14, X86R.R15]
 X86_ARG_REGISTERS = [X86R.RDI, X86R.RSI, X86R.RDX, X86R.RCX, X86R.R8, X86R.R9]
 
-X86_64BIT_PREFIX = 0b01001000; X86_REX_W = 1 << 3; X86_REX_R = 1 << 2; X86_REX_X = 1 << 1; X86_REX_B = 1;
+X86_64BIT_PREFIX = 0b01001000; 
+X86_MODRM = 0b11000000; 
+X86_REX_W = 1 << 3; X86_REX_R = 1 << 2; X86_REX_X = 1 << 1; X86_REX_B = 1;
 
-def prefix_byte_register_to_register(op1: X86R, op2: X86R): return X86_64BIT_PREFIX | (X86_REX_R if op1.value >= X86R.R8.value else 0) | (X86_REX_B if op2.value >= X86R.R8.value else 0)
-def modrm_register_to_register(op1: X86R, op2: X86R): return 0b11000000 | (op1.value & 0b111) << 3 | (op2.value & 0b111)
+def prefix_byte_reg(dest_register: X86R): return X86_64BIT_PREFIX | (X86_REX_R if dest_register.value >= X86R.R8.value else 0)
+def prefix_byte_rm(source_register: X86R): return X86_64BIT_PREFIX | (X86_REX_B if source_register.value >= X86R.R8.value else 0)
+def modrm_byte_reg(reg: X86R): return X86_MODRM | ((reg.value & 0b111) << 3);
+def modrm_byte_rm(rm: X86R): return X86_MODRM | (rm.value & 0b111);
+def modrm_byte_reg_opcode(opcode: int): return X86_MODRM | ((opcode & 0b111) << 3);
+
+def modrm_reg_to_reg(rm: X86R, reg: X86R): return modrm_byte_rm(rm) | modrm_byte_reg(reg)
+def prefix_reg_to_reg(rm: X86R, reg: X86R): return prefix_byte_rm(rm) | prefix_byte_reg(reg)
 
 class X8664ASMRenderer(Renderer):
-  def __init__(self, avx=False, avx2=False, avx512=False): self.avx, self.avx2, self.avx512, self.code = avx, avx2, avx512, bytearray()
+  def __init__(self, avx=False, avx2=False, avx512=False): self.avx, self.avx2, self.avx512 = avx, avx2, avx512; self.reset()
   def alloc_register(self) -> X86R: 
     reg = filter(lambda r: self.free_registers[r], X86R).__next__()
     self.free_registers[reg] = False
@@ -44,10 +54,12 @@ class X8664ASMRenderer(Renderer):
       return reg
     assert False, "something that wasnt a buffer in arguments"
 
-  def emit(self, code: bytearray): self.code = self.code + code
+  def emit(self, code: list[int]): self.code = self.code + bytearray(code)
   def tell(self): return len(self.code) - 1
 
-  def xor(self, op1: X86R, op2: X86R): self.emit(bytearray([prefix_byte_register_to_register(op1, op2), 0x31, modrm_register_to_register(op1, op2)]))
+  def xor(self, rm: X86R, reg: X86R): self.emit([prefix_reg_to_reg(rm, reg), 0x31, modrm_reg_to_reg(rm, reg)])
+  def jne(self, rip_relative_offset: int): self.emit([0x0F, 0x85] + little_endian(rip_relative_offset-0x7))
+  def sub(self, op1: X86R, immediate32: int): self.emit([prefix_byte_rm(op1) | X86_REX_W, 0x81, modrm_byte_rm(op1) | modrm_byte_reg_opcode(5)] + little_endian(immediate32))
 
   def reset(self):
     self.free_registers = { r: True for r in X86R }
@@ -55,24 +67,23 @@ class X8664ASMRenderer(Renderer):
     self.code = bytearray()
     self.buffer_registers: Dict[int, Tuple[X86R, DType]] = {}
 
-  def render_recursive(self, uops: List[UOp], off=0):
-    i, max = 0, len(uops)-off
+  def render_recursive(self, uops: List[UOp]) -> int:
+    i, max = 0, len(uops)
     while i < max:
-      u = uops[i + off]
+      u = uops[i]
       uop,dtype,src,args = u.op,u.dtype,u.src,u.arg
       print(u.render(False))
 
       if uop == UOps.DEFINE_GLOBAL: self.alloc_argument_register(dtype, args)
       elif uop == UOps.CONST: pass
       elif uop == UOps.RANGE: 
-        # counter_register = self.alloc_register()
-        # self.emit()
-        # loop_begin = i
-        # self.render_recursive(uops, i+1)
-        # loop_ends_at =
-        continue
+        counter_register = self.alloc_register()
+        loop_begin = self.tell()
+        i += self.render_recursive(uops[i+1:])
+        self.sub(counter_register, 1)
+        self.jne(-(self.tell() - loop_begin))
         
-      elif uop == UOps.ENDRANGE: return
+      elif uop == UOps.ENDRANGE: return i + 1
       else: assert False, f"op {uop} not implemented" 
 
       i+=1
@@ -101,8 +112,21 @@ class ASMRenderer(Renderer):
   def render(self, name: str, uops: List[UOp]) -> str:
     return self.renderer.render(name, uops)
 
+import subprocess
+
 if __name__ == "__main__":
   renderer = X8664ASMRenderer()
   renderer.xor(X86R.R9, X86R.RAX)
   renderer.xor(X86R.RAX, X86R.RAX)
+  renderer.sub(X86R.RCX, 1)
+  renderer.sub(X86R.RDX, 1)
+  renderer.sub(X86R.RAX, 1)
+  renderer.sub(X86R.RBX, 1)
+  renderer.sub(X86R.R8, 1)
+  renderer.sub(X86R.R9, 1)
+  renderer.sub(X86R.R12, 1)
+  renderer.jne(-(renderer.tell()))
   print(renderer.code.hex())
+  with open("/tmp/tinygradout", "wb+") as f:
+    f.write(renderer.code)
+  print(subprocess.check_output(["objdump", "-b", "binary", "-D", "-Mintel,x86-64", "-m", "i386", "/tmp/tinygradout"]).decode())
